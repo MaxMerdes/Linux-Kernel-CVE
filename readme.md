@@ -10,7 +10,6 @@ Ansible Playbooks zur Inventarisierung und Schwachstellenprüfung von Ubuntu Lin
 
 | Datei | Zweck |
 |---|---|
-| [`server_inventory.yml`](#1-server-inventarisierung) | Vollständige Serverinventarisierung (OS, Hardware, Docker, Netzwerk …) |
 | [`check_kernel_cves.yml`](#2-cve-schwachstellenprüfung) | Prüft auf Copy Fail & Dirty Frag Kernel-Schwachstellen |
 | [`inventory.ini`](#inventory-konfiguration) | Beispiel-Inventory mit Zielservern |
 
@@ -52,45 +51,7 @@ ansible -i inventory.ini all -m ping
 
 ---
 
-## 1. Server-Inventarisierung
-
-**Datei:** `server_inventory.yml`
-
-Liest umfassende Systeminformationen aus und gibt sie strukturiert im Terminal aus. Das Playbook ist **vollständig read-only** — es werden keinerlei Änderungen am Zielsystem vorgenommen.
-
-### Was wird erfasst?
-
-| Kategorie | Details |
-|---|---|
-| **Betriebssystem** | Distribution, Version, Kernel, Hostname (FQDN), Uptime, Timezone |
-| **CPU** | Modell, Anzahl physischer CPUs, Cores, Threads |
-| **Arbeitsspeicher** | RAM gesamt/frei, Swap, `/proc/meminfo` |
-| **Festplatten** | `lsblk` mit Typ, Filesystem, Modell & Serial; `df` Auslastung; `iostat` I/O-Stats; `smartctl` Gerätescan |
-| **Netzwerk** | Alle Interfaces mit IP-Adressen, Routing-Tabelle, DNS-Konfiguration, offene Ports (`ss`), UFW Firewall-Regeln |
-| **Docker** | Engine-Version, laufende & gestoppte Container (mit Image-Version & Status), Images, Volumes, Networks, Disk Usage |
-| **Systemdienste** | Laufende & fehlgeschlagene systemd-Units |
-| **Pakete** | Alle installierten Pakete (dpkg), aktualisierbare Pakete |
-| **Sicherheit** | Eingeloggte User, letzte 20 Logins, lokale User mit Login-Shell, Sudo-Konfiguration |
-
-### Verwendung
-
-```bash
-# Alle Server inventarisieren
-ansible-playbook -i inventory.ini server_inventory.yml
-
-# Nur einen Server
-ansible-playbook -i inventory.ini server_inventory.yml --limit server1
-
-# Nur bestimmte Kategorien
-ansible-playbook -i inventory.ini server_inventory.yml --tags docker
-ansible-playbook -i inventory.ini server_inventory.yml --tags "os,network,disk"
-```
-
-**Verfügbare Tags:** `os`, `hardware`, `disk`, `network`, `docker`, `services`, `packages`, `security`
-
----
-
-## 2. CVE-Schwachstellenprüfung
+## CVE-Schwachstellenprüfung
 
 **Datei:** `check_kernel_cves.yml`
 
