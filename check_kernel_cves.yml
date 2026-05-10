@@ -1,0 +1,374 @@
+---
+# ══════════════════════════════════════════════════════════════════════════════
+# Ansible Playbook: Linux Kernel CVE Check
+# Vulnerabilities: Copy Fail (CVE-2026-31431) & Dirty Frag (CVE-2026-43284,
+#                  CVE-2026-43500)
+#
+# Alle Operationen sind rein lesend – es werden keine Änderungen am System
+# vorgenommen. become: true wird nur wo zwingend nötig gesetzt.
+#
+# Verwendung:
+#   ansible-playbook -i inventory.ini check_kernel_cves.yml
+#   ansible-playbook -i inventory.ini check_kernel_cves.yml --tags copyfail
+#   ansible-playbook -i inventory.ini check_kernel_cves.yml --tags dirtyfrag
+# ══════════════════════════════════════════════════════════════════════════════
+- name: Check Ubuntu Linux for Copy Fail & Dirty Frag kernel vulnerabilities
+  hosts: all
+  gather_facts: true
+  become: false
+
+  vars:
+    # ── Copy Fail (CVE-2026-31431) ──────────────────────────────────────────
+    # Anfällig: Linux Kernel 4.14 – 6.19.12
+    # Fix merged mainline: 01. April 2026 (commit a664bf3d603d)
+    # Anfällig wenn: algif_aead geladen ODER in Kernel eingebaut (=y)
+    copyfail_cve: "CVE-2026-31431"
+    copyfail_module: "algif_aead"
+    copyfail_config_key: "CONFIG_CRYPTO_USER_API_AEAD"
+
+    # Gepatchte Ubuntu-Kernel-Paketversionen laut Ubuntu Security Notices.
+    # Format: ubuntu_codename -> minimale sichere linux-image Paketversion
+    copyfail_patched_kernels:
+      bionic:  "4.15.0-233.245"   # Ubuntu 18.04 LTS
+      focal:   "5.4.0-211.231"    # Ubuntu 20.04 LTS
+      jammy:   "5.15.0-137.147"   # Ubuntu 22.04 LTS
+      noble:   "6.8.0-60.63"      # Ubuntu 24.04 LTS
+
+    # ── Dirty Frag ──────────────────────────────────────────────────────────
+    # CVE-2026-43284: IPsec ESP (esp4 / esp6)
+    #   Anfällig: Kernel 4.14 – Fix merged 07. Mai 2026
+    # CVE-2026-43500: RxRPC
+    #   Anfällig: Kernel >= 6.4 (eingeführt Juni 2023), Patch noch ausstehend
+    dirtyfrag_cve_esp:   "CVE-2026-43284"
+    dirtyfrag_cve_rxrpc: "CVE-2026-43500"
+    dirtyfrag_modules_esp:   ["esp4", "esp6"]
+    dirtyfrag_module_rxrpc:  "rxrpc"
+    dirtyfrag_config_esp:    "CONFIG_XFRM_ESP"
+    dirtyfrag_config_rxrpc:  "CONFIG_AF_RXRPC"
+
+    # Gepatchte Ubuntu-Kernel-Paketversionen für Dirty Frag (ESP/CVE-2026-43284)
+    dirtyfrag_patched_kernels:
+      focal:   "5.4.0-214.234"
+      jammy:   "5.15.0-139.149"
+      noble:   "6.8.0-62.65"
+
+  tasks:
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 0. Systeminformationen sammeln
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Get running kernel version
+      command: uname -r
+      register: kernel_uname
+      changed_when: false
+      tags: [always]
+
+    - name: Get installed kernel package version (via dpkg)
+      command: >
+        dpkg-query -W -f='${Version}'
+        linux-image-{{ kernel_uname.stdout }}
+      register: kernel_pkg_version
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Read kernel build config
+      command: >
+        sh -c "[ -f /boot/config-{{ kernel_uname.stdout }} ] &&
+               cat /boot/config-{{ kernel_uname.stdout }} ||
+               ([ -f /proc/config.gz ] && zcat /proc/config.gz) ||
+               echo 'CONFIG_NOT_FOUND'"
+      register: kernel_config_raw
+      changed_when: false
+      failed_when: false
+      become: true
+      tags: [always]
+
+    - name: List loaded kernel modules
+      command: lsmod
+      register: lsmod_output
+      changed_when: false
+      tags: [always]
+
+    - name: Get Ubuntu codename
+      command: lsb_release -cs
+      register: ubuntu_codename
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 1. COPY FAIL – CVE-2026-31431
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: "[Copy Fail] Check if algif_aead module is currently loaded"
+      set_fact:
+        copyfail_module_loaded: >-
+          {{ 'algif_aead' in lsmod_output.stdout }}
+      tags: [copyfail]
+
+    - name: "[Copy Fail] Check if algif_aead is built into kernel (=y)"
+      set_fact:
+        copyfail_builtin: >-
+          {{ copyfail_config_key + '=y' in kernel_config_raw.stdout }}
+      tags: [copyfail]
+
+    - name: "[Copy Fail] Check if algif_aead is available as loadable module (=m)"
+      set_fact:
+        copyfail_module_available: >-
+          {{ copyfail_config_key + '=m' in kernel_config_raw.stdout }}
+      tags: [copyfail]
+
+    - name: "[Copy Fail] Determine if running kernel package is patched"
+      set_fact:
+        copyfail_codename: "{{ ubuntu_codename.stdout | lower }}"
+        copyfail_patched_ver: >-
+          {{ copyfail_patched_kernels[ubuntu_codename.stdout | lower]
+             | default('UNKNOWN') }}
+      tags: [copyfail]
+
+    - name: "[Copy Fail] Compare installed vs. patched kernel package version"
+      set_fact:
+        copyfail_kernel_patched: >-
+          {% if kernel_pkg_version.rc != 0 or kernel_pkg_version.stdout == '' %}
+          UNKNOWN
+          {% elif copyfail_patched_ver == 'UNKNOWN' %}
+          UNKNOWN
+          {% elif kernel_pkg_version.stdout is version(copyfail_patched_ver, '>=') %}
+          YES
+          {% else %}
+          NO
+          {% endif %}
+      tags: [copyfail]
+
+    - name: "[Copy Fail] Determine overall vulnerability status"
+      set_fact:
+        copyfail_vulnerable: >-
+          {% if copyfail_builtin or copyfail_module_loaded %}
+          {% if copyfail_kernel_patched == 'YES' %}
+          NO – Kernel gepatcht, Modul aber noch geladen/eingebaut
+          {% elif copyfail_kernel_patched == 'NO' %}
+          YES – Ungepatcht UND Modul aktiv
+          {% else %}
+          WAHRSCHEINLICH – Kernel-Version unbekannt, Modul aktiv
+          {% endif %}
+          {% elif copyfail_module_available %}
+          {% if copyfail_kernel_patched == 'YES' %}
+          NO – Kernel gepatcht
+          {% elif copyfail_kernel_patched == 'NO' %}
+          BEDINGT – Modul ladbar, Kernel ungepatcht (muss geladen werden)
+          {% else %}
+          BEDINGT – Modul ladbar, Kernel-Version unbekannt
+          {% endif %}
+          {% else %}
+          GERING – Modul nicht verfügbar / kein Crypto-ALG-API Build
+          {% endif %}
+      tags: [copyfail]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 2. DIRTY FRAG – CVE-2026-43284 (IPsec ESP)
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: "[Dirty Frag] Check if esp4 module is loaded"
+      set_fact:
+        dirtyfrag_esp4_loaded: "{{ 'esp4' in lsmod_output.stdout }}"
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check if esp6 module is loaded"
+      set_fact:
+        dirtyfrag_esp6_loaded: "{{ 'esp6' in lsmod_output.stdout }}"
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check if ESP is built into kernel (=y)"
+      set_fact:
+        dirtyfrag_esp_builtin: >-
+          {{ dirtyfrag_config_esp + '=y' in kernel_config_raw.stdout }}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check if ESP is available as loadable module (=m)"
+      set_fact:
+        dirtyfrag_esp_available: >-
+          {{ dirtyfrag_config_esp + '=m' in kernel_config_raw.stdout }}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Compare installed vs. patched kernel package version (ESP)"
+      set_fact:
+        dirtyfrag_esp_patched_ver: >-
+          {{ dirtyfrag_patched_kernels[ubuntu_codename.stdout | lower]
+             | default('UNKNOWN') }}
+        dirtyfrag_esp_kernel_patched: >-
+          {% set pver = dirtyfrag_patched_kernels[ubuntu_codename.stdout | lower] | default('UNKNOWN') %}
+          {% if kernel_pkg_version.rc != 0 or kernel_pkg_version.stdout == '' %}
+          UNKNOWN
+          {% elif pver == 'UNKNOWN' %}
+          UNKNOWN
+          {% elif kernel_pkg_version.stdout is version(pver, '>=') %}
+          YES
+          {% else %}
+          NO
+          {% endif %}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Determine ESP vulnerability status"
+      set_fact:
+        dirtyfrag_esp_vulnerable: >-
+          {% if dirtyfrag_esp_builtin or dirtyfrag_esp4_loaded or dirtyfrag_esp6_loaded %}
+          {% if dirtyfrag_esp_kernel_patched == 'YES' %}
+          NO – Kernel gepatcht
+          {% elif dirtyfrag_esp_kernel_patched == 'NO' %}
+          YES – Ungepatcht UND ESP aktiv (IPsec gefährdet)
+          {% else %}
+          WAHRSCHEINLICH – ESP aktiv, Kernel-Version unbekannt
+          {% endif %}
+          {% elif dirtyfrag_esp_available %}
+          {% if dirtyfrag_esp_kernel_patched == 'NO' %}
+          BEDINGT – ESP ladbar, Kernel ungepatcht
+          {% else %}
+          GERING – ESP nicht aktiv geladen
+          {% endif %}
+          {% else %}
+          GERING – ESP nicht verfügbar
+          {% endif %}
+      tags: [dirtyfrag]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 3. DIRTY FRAG – CVE-2026-43500 (RxRPC)
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: "[Dirty Frag] Check if rxrpc module is loaded"
+      set_fact:
+        dirtyfrag_rxrpc_loaded: "{{ 'rxrpc' in lsmod_output.stdout }}"
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check if RxRPC is built into kernel (=y)"
+      set_fact:
+        dirtyfrag_rxrpc_builtin: >-
+          {{ dirtyfrag_config_rxrpc + '=y' in kernel_config_raw.stdout }}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check if RxRPC is available as loadable module (=m)"
+      set_fact:
+        dirtyfrag_rxrpc_available: >-
+          {{ dirtyfrag_config_rxrpc + '=m' in kernel_config_raw.stdout }}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Check kernel version >= 6.4 (RxRPC vulnerability introduced)"
+      set_fact:
+        dirtyfrag_rxrpc_kernel_in_range: >-
+          {{ ansible_kernel is version('6.4', '>=') }}
+      tags: [dirtyfrag]
+
+    - name: "[Dirty Frag] Determine RxRPC vulnerability status"
+      set_fact:
+        dirtyfrag_rxrpc_vulnerable: >-
+          {% if not dirtyfrag_rxrpc_kernel_in_range %}
+          NO – Kernel < 6.4, nicht betroffen
+          {% elif dirtyfrag_rxrpc_builtin or dirtyfrag_rxrpc_loaded %}
+          YES – RxRPC aktiv, Kernel >= 6.4, KEIN offizieller Patch verfügbar
+          {% elif dirtyfrag_rxrpc_available %}
+          BEDINGT – RxRPC ladbar, Kernel >= 6.4, KEIN Patch verfügbar
+          {% else %}
+          GERING – RxRPC nicht verfügbar
+          {% endif %}
+      tags: [dirtyfrag]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 4. Report
+    # ══════════════════════════════════════════════════════════════════════════
+    - name: Print vulnerability assessment report
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════╗
+          ║          LINUX KERNEL CVE VULNERABILITY REPORT                     ║
+          ╚══════════════════════════════════════════════════════════════════════╝
+
+          Host          : {{ ansible_hostname }}
+          Ubuntu        : {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ubuntu_codename.stdout }})
+          Kernel        : {{ kernel_uname.stdout }}
+          Kernel Paket  : {{ kernel_pkg_version.stdout | default('unbekannt') }}
+          Kernel Config : {{ '/boot/config-' + kernel_uname.stdout
+                            if kernel_config_raw.stdout != 'CONFIG_NOT_FOUND'
+                            else 'NICHT GEFUNDEN – Prüfung nur über lsmod möglich' }}
+
+          ══════════════════════════════════════════════════════════════════════
+          CVE-2026-31431  »Copy Fail«
+          ══════════════════════════════════════════════════════════════════════
+          Beschreibung  : Lokale Rechteausweitung via AF_ALG AEAD Interface.
+                          Unprivilegierter User kann SUID-Binaries im Speicher
+                          korrumpieren und root erlangen.
+          Angriffsvektor: Lokal (kein Netzwerkzugang nötig)
+          Schwere        : KRITISCH (CVSS 9.8)
+
+          Modul geladen  : {{ copyfail_module_loaded }}
+          Built-in (=y)  : {{ copyfail_builtin }}
+          Ladbar (=m)    : {{ copyfail_module_available }}
+          Kernel gepatcht: {{ copyfail_kernel_patched }}
+                           (sicher ab: {{ copyfail_patched_ver }})
+
+          ┌─ ERGEBNIS ─────────────────────────────────────────────────────────┐
+          │  {{ (copyfail_vulnerable | trim).ljust(66) }}│
+          └────────────────────────────────────────────────────────────────────┘
+
+          Empfehlung:
+          {% if 'YES' in copyfail_vulnerable or 'WAHRSCHEINLICH' in copyfail_vulnerable %}
+          ⚡ SOFORTMASSNAHME: Kernel-Update einspielen!
+             Bis dahin Modul deaktivieren:
+             echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif_aead.conf
+             (Achtung: bricht Anwendungen die AF_ALG AEAD API nutzen)
+          {% elif 'BEDINGT' in copyfail_vulnerable %}
+          ⚠  Kernel-Update empfohlen. Modul ist ladbar aber nicht aktiv geladen.
+          {% else %}
+          ✅ Kein unmittelbares Handeln erforderlich.
+          {% endif %}
+
+          ══════════════════════════════════════════════════════════════════════
+          CVE-2026-43284 + CVE-2026-43500  »Dirty Frag«
+          ══════════════════════════════════════════════════════════════════════
+          Beschreibung  : Zwei Schwachstellen in IPsec ESP (43284) und RxRPC
+                          (43500). Seitenkorruption über splice()/sendfile()
+                          ermöglicht ebenfalls lokale Rechteausweitung.
+          Angriffsvektor: Lokal
+          Schwere        : KRITISCH (CVSS 9.1)
+
+          ── CVE-2026-43284 (IPsec ESP – esp4/esp6) ──────────────────────────
+          esp4 geladen   : {{ dirtyfrag_esp4_loaded }}
+          esp6 geladen   : {{ dirtyfrag_esp6_loaded }}
+          Built-in (=y)  : {{ dirtyfrag_esp_builtin }}
+          Ladbar (=m)    : {{ dirtyfrag_esp_available }}
+          Kernel gepatcht: {{ dirtyfrag_esp_kernel_patched }}
+                           (sicher ab: {{ dirtyfrag_esp_patched_ver }})
+
+          ┌─ ERGEBNIS ─────────────────────────────────────────────────────────┐
+          │  {{ (dirtyfrag_esp_vulnerable | trim).ljust(66) }}│
+          └────────────────────────────────────────────────────────────────────┘
+
+          ── CVE-2026-43500 (RxRPC) ──────────────────────────────────────────
+          Kernel >= 6.4  : {{ dirtyfrag_rxrpc_kernel_in_range }}
+          rxrpc geladen  : {{ dirtyfrag_rxrpc_loaded }}
+          Built-in (=y)  : {{ dirtyfrag_rxrpc_builtin }}
+          Ladbar (=m)    : {{ dirtyfrag_rxrpc_available }}
+          Patch verfügbar: NEIN (Stand: Mai 2026 – kein offizielles Fix)
+
+          ┌─ ERGEBNIS ─────────────────────────────────────────────────────────┐
+          │  {{ (dirtyfrag_rxrpc_vulnerable | trim).ljust(66) }}│
+          └────────────────────────────────────────────────────────────────────┘
+
+          Empfehlung Dirty Frag:
+          {% if 'YES' in dirtyfrag_esp_vulnerable or 'YES' in dirtyfrag_rxrpc_vulnerable %}
+          ⚡ SOFORTMASSNAHME:
+             ESP: echo "install esp4 /bin/false" >> /etc/modprobe.d/dirtyfrag.conf
+                  echo "install esp6 /bin/false" >> /etc/modprobe.d/dirtyfrag.conf
+                  (ACHTUNG: deaktiviert IPsec VPN-Tunnels!)
+             RxRPC: echo "install rxrpc /bin/false" >> /etc/modprobe.d/dirtyfrag.conf
+             Kernel-Update einspielen sobald verfügbar.
+          {% elif 'BEDINGT' in dirtyfrag_esp_vulnerable or 'BEDINGT' in dirtyfrag_rxrpc_vulnerable %}
+          ⚠  Module nicht aktiv geladen. Kernel-Update empfohlen.
+          {% else %}
+          ✅ Kein unmittelbares Handeln erforderlich.
+          {% endif %}
+
+          ══════════════════════════════════════════════════════════════════════
+          Referenzen
+          ══════════════════════════════════════════════════════════════════════
+          Copy Fail  : https://ubuntu.com/security/CVE-2026-31431
+          Dirty Frag : https://ubuntu.com/security/CVE-2026-43284
+                       https://ubuntu.com/security/CVE-2026-43500
+          Ubuntu USN : https://ubuntu.com/security/notices
+      tags: [always]
